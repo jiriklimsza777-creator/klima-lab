@@ -1,0 +1,572 @@
+# -*- coding: utf-8 -*-
+import json
+import random
+import re
+
+import numpy as np
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+
+PRODUCER_PROFILES = {
+    "Daringer": {"density": 0.55, "swing": 0.01, "step": 0.5, "durations": [0.5, 0.5, 1.0], "jump": 4, "register": (50, 66), "motif": [4.0]},
+    "Apollo Brown": {"density": 0.65, "swing": 0.02, "step": 0.5, "durations": [0.5, 1.0], "jump": 5, "register": (52, 68), "motif": [4.0]},
+    "J Dilla": {"density": 0.72, "swing": 0.09, "step": 0.25, "durations": [0.25, 0.5, 0.75], "jump": 5, "register": (54, 70), "motif": [2.0, 4.0]},
+    "Madlib": {"density": 0.78, "swing": 0.06, "step": 0.25, "durations": [0.25, 0.5, 0.75], "jump": 8, "register": (53, 72), "motif": [2.0, 4.0]},
+    "Knxwledge": {"density": 0.7, "swing": 0.08, "step": 0.25, "durations": [0.25, 0.5, 0.75], "jump": 4, "register": (56, 72), "motif": [2.0]},
+    "Nujabes": {"density": 0.62, "swing": 0.03, "step": 0.5, "durations": [0.5, 1.0, 1.5], "jump": 5, "register": (58, 74), "motif": [4.0]},
+    "Pete Rock": {"density": 0.68, "swing": 0.04, "step": 0.5, "durations": [0.5, 1.0], "jump": 5, "register": (54, 69), "motif": [2.0, 4.0]},
+    "9th Wonder": {"density": 0.66, "swing": 0.04, "step": 0.5, "durations": [0.5, 1.0], "jump": 4, "register": (52, 68), "motif": [4.0]},
+    "Q-Tip": {"density": 0.7, "swing": 0.05, "step": 0.25, "durations": [0.25, 0.5, 1.0], "jump": 5, "register": (55, 71), "motif": [2.0]},
+    "Havoc": {"density": 0.6, "swing": 0.02, "step": 0.5, "durations": [0.5, 1.0], "jump": 4, "register": (48, 64), "motif": [4.0]},
+    "RZA": {"density": 0.64, "swing": 0.03, "step": 0.5, "durations": [0.5, 1.0, 1.5], "jump": 7, "register": (47, 65), "motif": [4.0]},
+    "MF DOOM": {"density": 0.74, "swing": 0.06, "step": 0.25, "durations": [0.25, 0.5, 1.0], "jump": 7, "register": (52, 69), "motif": [2.0]},
+    "Dr Dre": {"density": 0.63, "swing": 0.01, "step": 0.5, "durations": [0.5, 1.0, 2.0], "jump": 4, "register": (50, 67), "motif": [4.0]},
+    "Kanye West": {"density": 0.76, "swing": 0.02, "step": 0.25, "durations": [0.25, 0.5, 1.0], "jump": 8, "register": (55, 74), "motif": [2.0, 4.0]},
+    "DJ Premier": {"density": 0.67, "swing": 0.03, "step": 0.5, "durations": [0.5, 0.5, 1.0], "jump": 4, "register": (53, 67), "motif": [2.0]},
+    "Just Blaze": {"density": 0.82, "swing": 0.02, "step": 0.25, "durations": [0.25, 0.5, 1.0], "jump": 7, "register": (57, 76), "motif": [2.0]},
+    "Timbaland": {"density": 0.8, "swing": 0.04, "step": 0.25, "durations": [0.25, 0.5], "jump": 9, "register": (54, 73), "motif": [2.0]},
+    "Metro Boomin": {"density": 0.88, "swing": 0.01, "step": 0.25, "durations": [0.25, 0.5, 0.5], "jump": 5, "register": (50, 68), "motif": [2.0]},
+}
+
+DEFAULT_PROFILE = {"density": 0.68, "swing": 0.04, "step": 0.25, "durations": [0.25, 0.5, 1.0], "jump": 5, "register": (52, 70), "motif": [2.0, 4.0]}
+
+
+def get_producer_energy(producer):
+    mapping = {
+        "Daringer": 3,
+        "Apollo Brown": 4,
+        "J Dilla": 5,
+        "Madlib": 5,
+        "Knxwledge": 5,
+        "Nujabes": 5,
+        "Pete Rock": 6,
+        "9th Wonder": 6,
+        "Q-Tip": 6,
+        "Havoc": 6,
+        "RZA": 6,
+        "MF DOOM": 7,
+        "Dr Dre": 7,
+        "Kanye West": 7,
+        "DJ Premier": 7,
+        "Just Blaze": 8,
+        "Timbaland": 8,
+        "Metro Boomin": 9,
+    }
+    return mapping.get(producer, random.randint(4, 7))
+
+
+def _split_theme(theme):
+    parts = [part.strip() for part in theme.split("|")]
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return "", theme
+
+
+def _get_producer_profile(producer):
+    profile = dict(DEFAULT_PROFILE)
+    profile.update(PRODUCER_PROFILES.get(producer, {}))
+    return profile
+
+
+def _build_theme_profile(theme_name):
+    profile = {
+        "scale": [0, 3, 5, 7, 10],
+        "density": 1.0,
+        "swing": 1.0,
+        "durations": [0.25, 0.5, 1.0],
+        "jump": 0,
+        "register_shift": 0,
+        "accent": 0,
+        "chords": [[0, 3, 7], [0, 5, 7], [0, 3, 7, 10]],
+        "progression": [0, 5, 7, 10],
+    }
+
+    rules = {
+        "Dark": {"scale": [0, 1, 5, 7, 8], "density": 0.85, "durations": [0.5, 1.0, 1.5], "jump": -1, "register_shift": -4, "chords": [[0, 3, 7], [0, 3, 6], [0, 5, 10]], "progression": [0, 1, 7, 8]},
+        "Aggressive": {"scale": [0, 1, 5, 7, 8], "density": 1.15, "durations": [0.25, 0.5], "jump": 2, "accent": 8, "chords": [[0, 3, 6], [0, 1, 7], [0, 5, 10]], "progression": [0, 1, 5, 8]},
+        "Jazzy": {"scale": [0, 3, 5, 7, 9, 10], "density": 0.95, "swing": 1.3, "durations": [0.5, 0.75, 1.0], "jump": 1, "register_shift": 2, "chords": [[0, 3, 7, 10], [0, 5, 7, 10], [0, 3, 7, 9]], "progression": [0, 2, 5, 9]},
+        "Soulful": {"scale": [0, 3, 5, 7, 9, 10], "density": 0.9, "swing": 1.15, "durations": [0.5, 1.0, 1.5], "register_shift": 3, "chords": [[0, 3, 7, 10], [0, 5, 9], [0, 3, 7, 9]], "progression": [0, 3, 5, 10]},
+        "Lo-Fi Chill": {"density": 0.75, "swing": 1.2, "durations": [0.5, 1.0, 1.5], "jump": -1, "register_shift": 1, "chords": [[0, 3, 7, 10], [0, 5, 7], [0, 3, 7, 9]]},
+        "Rainy Night": {"scale": [0, 1, 3, 5, 7, 10], "density": 0.78, "durations": [0.5, 1.0, 1.5, 2.0], "register_shift": 2, "chords": [[0, 3, 7], [0, 3, 10], [0, 5, 10]]},
+        "Sad Piano": {"density": 0.72, "durations": [0.5, 1.0, 2.0], "register_shift": 4, "chords": [[0, 3, 7], [0, 3, 10], [0, 7, 10]]},
+        "Street": {"density": 0.9, "durations": [0.25, 0.5, 1.0], "jump": 1, "register_shift": -2},
+        "Hard Boom Bap": {"density": 0.82, "swing": 1.1, "durations": [0.5, 0.5, 1.0], "jump": -1, "register_shift": -1, "chords": [[0, 3, 7], [0, 5, 10], [0, 3, 6]]},
+        "Experimental": {"density": 1.08, "swing": 1.25, "durations": [0.25, 0.5, 0.75, 1.25], "jump": 3, "chords": [[0, 1, 7], [0, 3, 6, 10], [0, 5, 8]], "progression": [0, 1, 6, 10]},
+        "Dreamy": {"density": 0.8, "durations": [0.5, 1.0, 1.5, 2.0], "register_shift": 5, "chords": [[0, 4, 7], [0, 5, 9], [0, 4, 7, 11]], "progression": [0, 4, 7, 9]},
+        "Melancholic": {"density": 0.76, "durations": [0.5, 1.0, 1.5], "register_shift": 2, "chords": [[0, 3, 7], [0, 3, 10], [0, 7, 10]]},
+    }
+
+    for label, update in rules.items():
+        if label.lower() in theme_name.lower():
+            profile.update(update)
+    return profile
+
+
+def _weighted_choice(values, fallback):
+    return random.choice(values) if values else fallback
+
+
+def _build_allowed_notes(root, scale, register_range):
+    low, high = register_range
+    return [pitch for pitch in [root + octv * 12 + interval for octv in range(-1, 3) for interval in scale] if low <= pitch <= high]
+
+
+def _choose_next_pitch(last_pitch, allowed, jump_limit):
+    if last_pitch is None:
+        return random.choice(allowed)
+
+    nearby = [pitch for pitch in allowed if abs(pitch - last_pitch) <= jump_limit]
+    if nearby and random.random() < 0.8:
+        return random.choice(nearby)
+    return random.choice(allowed)
+
+
+def _merge_unique(values):
+    return list(dict.fromkeys(values))
+
+
+def smart_generate(num_bars, theme="Freestyle", energy=5):
+    producer, theme_name = _split_theme(theme)
+    producer_profile = _get_producer_profile(producer)
+    theme_profile = _build_theme_profile(theme_name)
+
+    root = random.choice([55, 57, 58, 60, 62]) + theme_profile["register_shift"]
+    register_low, register_high = producer_profile["register"]
+    register = (max(48, register_low + theme_profile["register_shift"]), min(84, register_high + theme_profile["register_shift"]))
+    allowed = _build_allowed_notes(root, theme_profile["scale"], register)
+    if not allowed:
+        allowed = _build_allowed_notes(60, [0, 3, 5, 7, 10], (52, 72))
+
+    motif_length = _weighted_choice(producer_profile["motif"], 2.0)
+    step = producer_profile["step"]
+    density = min(0.95, producer_profile["density"] * theme_profile["density"] * (0.65 + energy / 12.0))
+    swing_amount = producer_profile["swing"] * theme_profile["swing"]
+    durations = _merge_unique(producer_profile["durations"] + theme_profile["durations"])
+    jump_limit = max(2, producer_profile["jump"] + theme_profile["jump"])
+
+    motif = []
+    last_pitch = None
+    accent_boost = theme_profile["accent"]
+
+    for t in np.arange(0, motif_length, step):
+        strong_beat = abs(t % 1.0) < 0.001
+        hit_chance = density + (0.08 if strong_beat else -0.04)
+        if random.random() < max(0.15, min(0.98, hit_chance)):
+            pitch = _choose_next_pitch(last_pitch, allowed, jump_limit)
+            duration = _weighted_choice(durations, 0.5)
+            velocity = random.randint(68, 102) + (10 if strong_beat else 0) + accent_boost
+            swing = swing_amount if (t % 0.5 != 0) else 0.0
+            motif.append([float(round(t + swing, 3)), pitch, float(duration), max(1, min(127, velocity))])
+            last_pitch = pitch
+
+    if not motif:
+        motif.append([0.0, random.choice(allowed), 0.5, 90])
+
+    data = []
+    repeats = int(np.ceil((num_bars * 4) / motif_length))
+    for bar in range(repeats):
+        for note in motif:
+            start_time = note[0] + bar * motif_length
+            if start_time < num_bars * 4:
+                variation_roll = random.random()
+                new_pitch = note[1]
+                new_duration = note[2]
+                if variation_roll < 0.18:
+                    new_pitch = _choose_next_pitch(note[1], allowed, max(2, jump_limit - 1))
+                if variation_roll > 0.82:
+                    new_duration = _weighted_choice(durations, note[2])
+                data.append([float(round(start_time, 3)), int(new_pitch), float(new_duration), int(note[3])])
+
+    data.sort(key=lambda x: x[0])
+    return data
+
+
+def chord_generate(num_bars, theme="Freestyle", energy=5):
+    producer, theme_name = _split_theme(theme)
+    producer_profile = _get_producer_profile(producer)
+    theme_profile = _build_theme_profile(theme_name)
+
+    root = random.choice([48, 50, 53, 55, 57, 60]) + max(-5, min(5, theme_profile["register_shift"]))
+    beat_step = 1.0 if producer_profile["density"] >= 0.78 or energy >= 8 else 2.0
+    if "Dreamy" in theme_name or "Rainy" in theme_name or "Sad" in theme_name:
+        beat_step = 2.0
+
+    progression_steps = [0] + [random.choice(theme_profile["progression"]) for _ in range(3)]
+    data = []
+
+    for idx, start in enumerate(np.arange(0, num_bars * 4, beat_step)):
+        prog_root = root + progression_steps[idx % len(progression_steps)]
+        chord_shape = random.choice(theme_profile["chords"])
+        base_duration = 1.5 if beat_step == 1.0 else random.choice([2.0, 3.0])
+        if producer in {"Nujabes", "Apollo Brown", "Dr Dre"}:
+            base_duration += 0.5
+        velocity_base = random.randint(66, 94) + theme_profile["accent"]
+
+        for tone_idx, interval in enumerate(chord_shape):
+            pitch = prog_root + interval
+            if 36 <= pitch <= 84:
+                velocity = velocity_base - tone_idx * random.randint(4, 8)
+                data.append([float(round(start, 3)), int(pitch), float(min(4.0, base_duration)), int(max(1, min(127, velocity)))])
+
+        if producer in {"DJ Premier", "J Dilla", "MF DOOM", "Metro Boomin"} and random.random() < 0.45:
+            top_pitch = prog_root + random.choice(chord_shape)
+            if 48 <= top_pitch + 12 <= 90:
+                data.append([float(round(start + 0.5, 3)), int(top_pitch + 12), float(0.5 if beat_step == 1.0 else 1.0), int(max(1, min(127, velocity_base + 6)))])
+
+    data.sort(key=lambda x: (x[0], x[1]))
+    return data
+
+
+def generate_supporting_layer(base_melody, theme="Freestyle", instrument_name="Alto Sax", energy=5):
+    """Generuje doprovodnou linku k existující melodii bez slepého kopírování."""
+    if not base_melody:
+        return []
+
+    producer, theme_name = _split_theme(theme)
+    producer_profile = _get_producer_profile(producer)
+    theme_profile = _build_theme_profile(theme_name)
+    base_notes = sorted(base_melody, key=lambda x: x[0])
+    source_starts = sorted({round(note[0], 3) for note in base_notes})
+    base_pitches = [int(note[1]) for note in base_notes if len(note) > 1]
+    base_center = int(sum(base_pitches) / len(base_pitches)) if base_pitches else 60
+
+    instrument_profiles = {
+        "Alto Sax": {"register_shift": 7, "density": 0.5, "durations": [0.5, 1.0, 1.5], "response_shift": [0.5, 1.0]},
+        "Flute": {"register_shift": 12, "density": 0.42, "durations": [1.0, 1.5, 2.0], "response_shift": [0.5, 1.0]},
+        "String Ensemble": {"register_shift": 5, "density": 0.35, "durations": [1.5, 2.0, 3.0], "response_shift": [0.0, 1.0]},
+        "Pad (warm)": {"register_shift": 3, "density": 0.28, "durations": [2.0, 3.0, 4.0], "response_shift": [0.0, 2.0]},
+        "Trumpet": {"register_shift": 8, "density": 0.45, "durations": [0.5, 1.0, 1.5], "response_shift": [0.5, 1.0]},
+        "Nylon Guitar": {"register_shift": 0, "density": 0.4, "durations": [0.5, 1.0], "response_shift": [0.0, 0.5]},
+        "Steel String Guitar": {"register_shift": 2, "density": 0.42, "durations": [0.5, 1.0], "response_shift": [0.0, 0.5]},
+        "Acoustic Bass": {"register_shift": -18, "density": 0.55, "durations": [1.0, 1.5, 2.0], "response_shift": [0.0]},
+        "Electric Bass": {"register_shift": -16, "density": 0.6, "durations": [0.5, 1.0, 1.5], "response_shift": [0.0, 0.5]},
+        "Drawbar Organ": {"register_shift": 0, "density": 0.38, "durations": [1.0, 1.5, 2.0], "response_shift": [0.0, 0.5]},
+        "Lead (square)": {"register_shift": 9, "density": 0.5, "durations": [0.25, 0.5, 1.0], "response_shift": [0.5, 1.0]},
+    }
+    profile = instrument_profiles.get(instrument_name, {"register_shift": 7, "density": 0.4, "durations": [0.5, 1.0, 1.5], "response_shift": [0.5, 1.0]})
+
+    target_center = max(36, min(90, base_center + profile["register_shift"]))
+    register = (max(36, target_center - 8), min(90, target_center + 10))
+    allowed = _build_allowed_notes(target_center, theme_profile["scale"], register)
+    if not allowed:
+        allowed = _build_allowed_notes(60, [0, 3, 5, 7, 10], (50, 80))
+
+    density = profile["density"] * theme_profile["density"] * (0.8 + energy / 18.0)
+    durations = _merge_unique(profile["durations"] + theme_profile["durations"])
+    jump_limit = max(2, producer_profile["jump"] + theme_profile["jump"])
+    layer = []
+    last_pitch = None
+
+    for source_start in source_starts:
+        if random.random() > min(0.85, density):
+            continue
+
+        start = round(source_start + random.choice(profile["response_shift"]), 3)
+        source_at_start = [note for note in base_notes if abs(note[0] - source_start) < 0.001]
+        source_pitch = int(source_at_start[0][1]) if source_at_start else base_center
+
+        candidate_pool = [pitch for pitch in allowed if abs(pitch - source_pitch) >= 2]
+        if instrument_name in {"Acoustic Bass", "Electric Bass"}:
+            candidate_pool = [pitch for pitch in allowed if pitch <= base_center - 7] or allowed
+        elif instrument_name in {"Pad (warm)", "String Ensemble"}:
+            candidate_pool = [pitch for pitch in allowed if pitch >= base_center - 2] or allowed
+
+        pitch = _choose_next_pitch(last_pitch, candidate_pool or allowed, jump_limit)
+        duration = _weighted_choice(durations, 1.0)
+        velocity = random.randint(58, 88)
+        layer.append([start, int(pitch), float(duration), int(velocity)])
+
+        if instrument_name in {"Pad (warm)", "String Ensemble", "Drawbar Organ"} and random.random() < 0.45:
+            harmony_pitch = pitch + random.choice([3, 5, 7])
+            if harmony_pitch in allowed or 36 <= harmony_pitch <= 90:
+                layer.append([start, int(max(36, min(90, harmony_pitch))), float(duration), int(max(1, velocity - 8))])
+
+        last_pitch = pitch
+
+    layer = [note for note in layer if note[0] < max(source_starts) + 4.0]
+    layer.sort(key=lambda x: (x[0], x[1]))
+    return layer
+
+
+def _extract_note_array(content):
+    if not content:
+        return None
+
+    stripped = content.strip()
+    if stripped.startswith("["):
+        return stripped
+
+    match = re.search(r"\[\s*\[.*\]\s*\]", stripped, re.DOTALL)
+    return match.group() if match else None
+
+
+def _clamp_int(v, lo, hi):
+    return int(max(lo, min(hi, int(v))))
+
+
+def _quantize(value, grid):
+    if grid <= 0:
+        return value
+    return round(round(float(value) / float(grid)) * float(grid), 3)
+
+
+def _group_by_bar(notes, bars):
+    groups = {i: [] for i in range(int(bars))}
+    for n in notes:
+        try:
+            start = float(n[0])
+        except Exception:
+            continue
+        bar = int(start // 4.0)
+        if 0 <= bar < int(bars):
+            groups[bar].append(n)
+    return groups
+
+
+def _prune_monophonic(notes):
+    """Keep at most one note per start time (highest velocity)."""
+    by_start = {}
+    for n in notes:
+        start = float(n[0])
+        vel = int(n[3]) if len(n) > 3 else 80
+        prev = by_start.get(start)
+        if prev is None or vel > (int(prev[3]) if len(prev) > 3 else 80):
+            by_start[start] = n
+    return list(by_start.values())
+
+
+def _limit_density(notes, bars, role, counter_style, creativity):
+    """Hard limiter to avoid AI 'patlanina'."""
+    role = (role or "Lead").lower()
+    counter_style = (counter_style or "smooth").lower()
+    creativity = _clamp_int(creativity, 0, 100)
+
+    # Conservative defaults; creativity increases allowed density slightly.
+    base = 5
+    if role == "bass":
+        base = 3
+    elif role == "counter":
+        base = 4 if counter_style != "busy" else 7
+    elif role == "lead":
+        base = 6
+
+    max_per_bar = int(max(2, round(base + (creativity / 100.0) * 2)))
+    groups = _group_by_bar(notes, bars)
+    kept = []
+
+    for bar, items in groups.items():
+        # Prefer notes with higher velocity, then longer duration.
+        items_sorted = sorted(
+            items,
+            key=lambda x: (int(x[3]) if len(x) > 3 else 80, float(x[2]) if len(x) > 2 else 0.25),
+            reverse=True,
+        )
+        kept.extend(items_sorted[:max_per_bar])
+
+    if role in {"lead", "counter", "bass"}:
+        kept = _prune_monophonic(kept)
+
+    kept.sort(key=lambda x: (float(x[0]), int(x[1])))
+    return kept
+
+
+def _build_chord_loop(theme_name, bars, energy=5):
+    """Deterministic-ish 4-chord loop based on theme profile (recognizable mood)."""
+    producer, theme_only = _split_theme(theme_name)
+    theme_profile = _build_theme_profile(theme_only)
+    energy = _clamp_int(energy, 1, 10)
+
+    root = random.choice([48, 50, 53, 55, 57, 60]) + max(-5, min(5, theme_profile["register_shift"]))
+    progression = theme_profile.get("progression") or [0, 5, 7, 10]
+    chord_shapes = theme_profile.get("chords") or [[0, 3, 7], [0, 5, 7], [0, 3, 7, 10]]
+
+    # Always 4-bar progression; then repeat if bars > 4.
+    prog_steps = [0, progression[1 % len(progression)], progression[2 % len(progression)], progression[3 % len(progression)]]
+    data = []
+    for bar in range(int(bars)):
+        start = float(bar * 4.0)
+        step = prog_steps[bar % 4]
+        chord = chord_shapes[(bar + (0 if energy < 7 else 1)) % len(chord_shapes)]
+        base_pitch = root + int(step)
+        vel_base = random.randint(62, 92)
+        # Chords: 3–4 notes, 1 chord per bar.
+        chord_notes = chord[:4]
+        for idx, interval in enumerate(chord_notes):
+            pitch = base_pitch + int(interval)
+            if 36 <= pitch <= 90:
+                vel = _clamp_int(vel_base - idx * 7, 1, 127)
+                data.append([start, int(pitch), 4.0, int(vel)])
+    data.sort(key=lambda x: (x[0], x[1]))
+    return data
+
+
+def _normalize_ai_chords(raw_notes, theme_name, bars, energy, creativity):
+    """
+    Turn AI output into a clean chord loop:
+    - 1 chord per bar (start at bar*4)
+    - 3–4 notes per chord
+    - duration 4 beats
+    If AI output is unusable, fall back to theme-based loop.
+    """
+    if not raw_notes:
+        return _build_chord_loop(theme_name, bars, energy=energy)
+
+    bars = int(bars)
+    creativity = _clamp_int(creativity, 0, 100)
+
+    # Map notes into bars; pick 3–4 best pitches per bar.
+    groups = _group_by_bar(raw_notes, bars)
+    cleaned = []
+    for bar in range(bars):
+        start = float(bar * 4.0)
+        items = groups.get(bar, [])
+        if not items:
+            continue
+
+        # Prefer unique pitches, higher velocity.
+        items_sorted = sorted(items, key=lambda x: (int(x[3]) if len(x) > 3 else 80), reverse=True)
+        picked = []
+        used_pitches = set()
+        for n in items_sorted:
+            pitch = int(n[1])
+            if pitch in used_pitches:
+                continue
+            used_pitches.add(pitch)
+            picked.append(pitch)
+            if len(picked) >= (4 if creativity > 60 else 3):
+                break
+
+        if len(picked) < 3:
+            continue
+
+        picked.sort()
+        base_vel = int(items_sorted[0][3]) if len(items_sorted[0]) > 3 else 85
+        for idx, pitch in enumerate(picked):
+            vel = _clamp_int(base_vel - idx * 7, 1, 127)
+            cleaned.append([start, int(pitch), 4.0, int(vel)])
+
+    # If we didn't manage to build most bars, fall back to theme loop.
+    if len(cleaned) < max(3, bars - 1) * 3:
+        return _build_chord_loop(theme_name, bars, energy=energy)
+
+    cleaned.sort(key=lambda x: (x[0], x[1]))
+    return cleaned
+
+
+def call_chatgpt_ai(
+    api_key,
+    user_prompt,
+    bars,
+    chords_mode,
+    theme_name,
+    secret_rule="",
+    energy=5,
+    role="Lead",
+    creativity=50,
+    counter_style="Smooth",
+):
+    if not api_key or OpenAI is None:
+        return None
+
+    try:
+        client = OpenAI(api_key=api_key.strip())
+        beats = bars * 4
+        mode_label = "AKORDY (polyfonie)" if chords_mode else "MELODIE (monofonní/lead)"
+        mode_rule = (
+            "Každý harmonický okamžik musí obsahovat více současně znějících tónů. Vracej skutečné akordy, ne jen jednonotový lead."
+            if chords_mode
+            else "Generuj pouze jednu hlavní notu v jeden čas. Nepiš bloky akordů ani více současných tónů."
+        )
+
+        creativity = max(0, min(100, int(creativity)))
+        role = str(role or "Lead")
+        counter_style = str(counter_style or "Smooth")
+        groove_hint = (
+            "HODNĚ TIGHT groove: drž většinu startů na 1/8 nebo 1/16 mřížce, minimum mikro-posunů a minimum chaosu."
+            if creativity <= 25
+            else (
+                "BALANCE groove/kreativita: používej swing a synkopy, ale zachovej čitelný motiv."
+                if creativity <= 70
+                else "HODNĚ KREATIVNÍ: víc synkop, víc variací motivu, občas mikro-posun startů (stále hudebně)."
+            )
+        )
+
+        role_rule = ""
+        if chords_mode or role.lower() == "chords":
+            role_rule = (
+                "ROLE: CHORDS. Vytvoř konkrétní opakovatelnou SMYČKU.\n"
+                "- Přesně 1 akord na takt.\n"
+                "- Starty akordů přesně na 0, 4, 8, 12, ... (po 4 beatech).\n"
+                "- Každý akord má 3 až 4 současné tóny.\n"
+                "- Délka každého akordu přesně 4 beaty.\n"
+                "- Žádné arpeggio, žádná melodička navrch.\n"
+                "- Smyčka se musí po 4 taktech opakovat (s malou variací max 1 tón)."
+            )
+        elif role.lower() == "bass":
+            role_rule = "ROLE: BASS. Piš nízké tóny (MIDI pitch typicky 36-55), jednoduché rytmy, méně not, spíš kořeny/kvinty."
+        elif role.lower() == "counter":
+            if counter_style.lower() == "busy":
+                role_rule = "ROLE: COUNTER (Busy). Odpovídej leadu, ale buď aktivnější: kratší fráze, víc not, stále neplň každý beat."
+            else:
+                role_rule = "ROLE: COUNTER (Smooth). Call & response: nech hodně pauz, začínej spíš na offbeatech (např. +0.5, +1.0), používej delší tóny a méně not."
+        else:
+            role_rule = "ROLE: LEAD. Silný 1-2 taktový motiv, opakuj s malými variacemi, čitelná melodie."
+
+        system_instructions = (
+            "Jsi MIDI architekt a hudební teoretik. Generuj pouze JSON pole not.\n\n"
+            "HUDEBNÍ PRAVIDLA:\n"
+            "1. Používej pentatoniku nebo bluesovou stupnici.\n"
+            "2. Tvoř synkopy a lehký swing.\n"
+            "3. Postav 1-2 taktový motiv a opakuj ho s malými variacemi.\n"
+            "4. Měň velocity, ať výsledek není plochý.\n\n"
+            f"KONTEXT: Téma: {theme_name}. Styl: {user_prompt or 'Freestyle'}. Energie: {energy}/10. Délka: {beats} beatů.\n"
+            f"REŽIM: {mode_label}.\n"
+            f"SPECIÁLNÍ PRAVIDLO: {mode_rule}\n"
+            f"{role_rule}\n"
+            f"GROOVE: {groove_hint}\n"
+            "VÝSTUP: Pouze validní JSON ve formátu [[start, pitch, duration, velocity], ...]. Bez dalšího textu."
+        )
+
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": system_instructions}],
+            temperature=0.8,
+        )
+
+        content = response.choices[0].message.content
+        note_array = _extract_note_array(content)
+        if not note_array:
+            return None
+
+        raw_data = json.loads(note_array)
+        fixed = []
+        for note in raw_data:
+            if not isinstance(note, (list, tuple)) or len(note) < 3:
+                continue
+
+            start = round(max(0, float(note[0])), 3)
+            pitch = int(note[1])
+            duration = round(max(0.125, float(note[2])), 3)
+            velocity = int(note[3]) if len(note) > 3 else random.randint(75, 105)
+            velocity = max(1, min(127, velocity))
+
+            if 12 <= pitch <= 127:
+                if role.lower() == "bass" and pitch > 60:
+                    continue
+                fixed.append([start, pitch, duration, velocity])
+
+        fixed.sort(key=lambda x: (x[0], x[1]))
+
+        # Hard cleanup to keep AI output usable.
+        if chords_mode or role.lower() == "chords":
+            return _normalize_ai_chords(fixed, theme_name, bars, energy=energy, creativity=creativity)
+
+        fixed = _limit_density(fixed, bars, role, counter_style, creativity)
+        return fixed or None
+    except Exception as e:
+        print(f"Chyba Generator_not: {e}")
+        return None

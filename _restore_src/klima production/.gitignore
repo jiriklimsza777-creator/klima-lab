@@ -1,0 +1,3 @@
+.local_secrets.json
+*.env
+*.env.local
